@@ -12,6 +12,7 @@ import json
 from datetime import datetime
 
 class MongoJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder for MongoDB specific types."""
     def default(self, obj):
         if isinstance(obj, ObjectId):
             return str(obj)
@@ -33,6 +34,33 @@ class TenantDatabaseChatbot:
         
         # Configure global settings
         Settings.llm = self.llm
+        
+        # Initialize cache
+        self.data_cache = {}
+        
+        # Define collection-specific configurations
+        self.collection_config = {
+            'contacts': {
+                'unique_fields': ['email', 'primaryContactNo', 'sequenceId'],
+                'sort_field': 'sequenceIdReadOnly'
+            },
+            'messages': {
+                'unique_fields': ['messageId'],
+                'sort_field': 'createdAt'
+            },
+            'conversations': {
+                'unique_fields': ['conversationId'],
+                'sort_field': 'createdAt'
+            },
+            'customers': {
+                'unique_fields': ['customerId', 'email'],
+                'sort_field': 'createdAt'
+            },
+            'cases': {
+                'unique_fields': ['caseId'],
+                'sort_field': 'createdAt'
+            }
+        }
         
         # Get collections
         self.collections = self._get_collections()
@@ -82,60 +110,113 @@ class TenantDatabaseChatbot:
         formatted_results = [self._format_document(doc) for doc in results]
         return json.dumps(formatted_results, indent=2, ensure_ascii=False)
 
+    def verify_document(self, collection: str, field: str, value: str) -> str:
+        """Verify document existence in any collection by field value."""
+        try:
+            if collection not in self.collections:
+                return json.dumps({"error": f"Collection '{collection}' not found"})
+
+            query = {field: value}
+            mongo_collection = self.collections[collection]["collection"]
+            results = list(mongo_collection.find(query))
+
+            if not results:
+                return json.dumps({"error": f"No document found in {collection} with {field}: {value}"})
+
+            return self._format_results(results)
+        except Exception as e:
+            return json.dumps({"error": f"Error verifying document: {str(e)}"})
+
+    def get_document_details(self, collection: str, query_params: Dict) -> str:
+        """Get detailed document information from any collection."""
+        try:
+            if collection not in self.collections:
+                return json.dumps({"error": f"Collection '{collection}' not found"})
+
+            # Build query based on provided parameters
+            query = {}
+            config = self.collection_config.get(collection, {})
+            unique_fields = config.get('unique_fields', [])
+
+            for field in unique_fields:
+                if field in query_params:
+                    query[field] = query_params[field]
+
+            if not query:
+                return json.dumps({"error": "No valid search criteria provided"})
+
+            results = json.loads(self.search_collection(collection, query, 1))
+            
+            if isinstance(results, dict) and "error" in results:
+                return json.dumps(results)
+
+            return json.dumps({
+                "found": True,
+                "document": results[0] if results else None
+            })
+        except Exception as e:
+            return json.dumps({"error": f"Error getting document details: {str(e)}"})
+
+    def get_related_documents(self, collection: str, ref_field: str, ref_value: str) -> str:
+        """Get related documents across collections."""
+        try:
+            if collection not in self.collections:
+                return json.dumps({"error": f"Collection '{collection}' not found"})
+
+            query = {ref_field: ref_value}
+            results = json.loads(self.search_collection(collection, query))
+
+            if isinstance(results, dict) and "error" in results:
+                return json.dumps(results)
+
+            return json.dumps({
+                "found": True,
+                "documents": results
+            })
+        except Exception as e:
+            return json.dumps({"error": f"Error getting related documents: {str(e)}"})
+
     def search_collection(self, collection: str, query: Dict = None, limit: int = 10) -> str:
         """Search documents in a specific collection."""
         try:
             if collection not in self.collections:
                 available = list(self.collections.keys())
-                return f"Collection '{collection}' not found. Available collections: {available}"
+                return json.dumps({"error": f"Collection '{collection}' not found", "available": available})
             
             mongo_collection = self.collections[collection]["collection"]
+            
+            # Add validation for query
+            if query and not isinstance(query, dict):
+                return json.dumps({"error": "Invalid query format"})
+            
             results = list(mongo_collection.find(query or {}).limit(limit))
             
             if not results:
-                return f"No documents found in collection '{collection}'"
+                return json.dumps({"error": f"No documents found in collection '{collection}' matching query"})
                 
             return self._format_results(results)
         except Exception as e:
-            return f"Error searching collection: {str(e)}"
-
-    def get_collection_stats(self, collection: str) -> str:
-        """Get statistics about a specific collection."""
-        try:
-            if collection not in self.collections:
-                available = list(self.collections.keys())
-                return f"Collection '{collection}' not found. Available collections: {available}"
-            
-            mongo_collection = self.collections[collection]["collection"]
-            stats = {
-                "total_documents": mongo_collection.count_documents({}),
-                "fields": list(self.collections[collection]["sample_schema"].keys())
-            }
-            return json.dumps(stats, indent=2)
-        except Exception as e:
-            return f"Error getting collection stats: {str(e)}"
+            return json.dumps({"error": f"Error searching collection: {str(e)}"})
 
     def get_recent_documents(self, collection: str, limit: int = 5) -> str:
         """Get most recent documents from a collection."""
         try:
             if collection not in self.collections:
                 available = list(self.collections.keys())
-                return f"Collection '{collection}' not found. Available collections: {available}"
+                return json.dumps({"error": f"Collection '{collection}' not found", "available": available})
             
             mongo_collection = self.collections[collection]["collection"]
+            config = self.collection_config.get(collection, {})
+            sort_field = config.get('sort_field', 'createdAt')
             
-            # Choose appropriate sort field based on collection
-            if collection == "contacts":
-                results = list(mongo_collection.find().sort("sequenceIdReadOnly", -1).limit(limit))
-            else:
-                results = list(mongo_collection.find().sort("createdAt", -1).limit(limit))
+            results = list(mongo_collection.find().sort(sort_field, -1).limit(limit))
             
             if not results:
-                return f"No documents found in collection '{collection}'"
+                return json.dumps({"error": f"No documents found in collection '{collection}'"})
                 
             return self._format_results(results)
         except Exception as e:
-            return f"Error getting recent documents: {str(e)}"
+            return json.dumps({"error": f"Error getting recent documents: {str(e)}"})
 
     def _create_tools(self) -> List[FunctionTool]:
         """Create tools for database interaction."""
@@ -143,34 +224,55 @@ class TenantDatabaseChatbot:
             FunctionTool.from_defaults(
                 fn=self.search_collection,
                 name="search_collection",
-                description="Search for documents in a specific collection. Args: collection (str), query (dict, optional), limit (int, optional)"
+                description="Search any collection with custom query. Args: collection (str), query (dict, optional), limit (int, optional)"
             ),
             FunctionTool.from_defaults(
-                fn=self.get_collection_stats,
-                name="get_collection_stats",
-                description="Get statistics about a specific collection. Args: collection (str)"
+                fn=self.verify_document,
+                name="verify_document",
+                description="Verify document existence in any collection. Args: collection (str), field (str), value (str)"
+            ),
+            FunctionTool.from_defaults(
+                fn=self.get_document_details,
+                name="get_document_details",
+                description="Get detailed document information from any collection. Args: collection (str), query_params (dict)"
+            ),
+            FunctionTool.from_defaults(
+                fn=self.get_related_documents,
+                name="get_related_documents",
+                description="Get related documents across collections. Args: collection (str), ref_field (str), ref_value (str)"
             ),
             FunctionTool.from_defaults(
                 fn=self.get_recent_documents,
                 name="get_recent_documents",
-                description="Get the most recent documents from a collection. Args: collection (str), limit (int, optional)"
+                description="Get recent documents from any collection. Args: collection (str), limit (int, optional)"
             )
         ]
 
     def _create_agent(self) -> ReActAgent:
-        """Create the ReAct agent with collection context."""
-        available_collections = list(self.collections.keys())
-        
+        """Create the ReAct agent with multi-collection context."""
         context = f"""You are an AI assistant managing a MongoDB database.
-        Available collections: {available_collections}
+        Available collections: {list(self.collections.keys())}
+        
+        IMPORTANT RULES:
+        1. ALWAYS verify data exists before making statements
+        2. For each collection, use appropriate search criteria:
+           - contacts: email, primaryContactNo, sequenceId
+           - messages: messageId
+           - conversations: conversationId
+           - customers: customerId, email
+           - cases: caseId
+        3. When searching across collections:
+           - Use get_related_documents for linked data
+           - Verify relationships exist
+        4. Never make assumptions about data
+        5. If multiple results exist, mention that
+        6. For any uncertain responses, check the database again
         
         Collection schemas:
         {json.dumps({k: v['sample_schema'] for k, v in self.collections.items()}, indent=2)}
         
-        When searching for contacts, use the 'contacts' collection.
-        When searching for messages, use the 'messages' collection.
-        When searching for conversations, use the 'conversations' collection.
-        When working with contacts, remember they are sorted by sequenceIdReadOnly.
+        Collection configurations:
+        {json.dumps(self.collection_config, indent=2)}
         """
 
         return ReActAgent.from_tools(
@@ -186,9 +288,10 @@ class TenantDatabaseChatbot:
         print(f"Available collections: {list(self.collections.keys())}")
         print("\nYou can ask questions like:")
         print("- Show me recent contacts")
-        print("- How many messages do we have?")
-        print("- Find conversations from last week")
-        print("- Show me customer details")
+        print("- Find messages from [email]")
+        print("- Show me conversations with [customer]")
+        print("- Get case details for [caseId]")
+        print("- Find all messages in conversation [conversationId]")
         
         while True:
             user_input = input("\nUser: ").strip()
@@ -196,6 +299,9 @@ class TenantDatabaseChatbot:
                 break
             
             try:
+                # Clear cache for new query
+                self.data_cache = {}
+                
                 response = self.agent.chat(user_input)
                 print(f"\nAssistant: {response}")
             except Exception as e:
