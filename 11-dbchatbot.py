@@ -275,6 +275,15 @@ class TenantDatabaseChatbot:
         {json.dumps(self.collection_config, indent=2)}
         """
 
+# tools=self.tools:
+#   Passes the list of FunctionTool instances you created earlier. These tools define how the agent interacts with the MongoDB database.
+# llm=self.llm:
+#   Specifies the language model (in this case, OpenAI GPT-4) that the agent uses for generating responses and reasoning.
+# verbose=True:
+#   Enables detailed logging, which can be helpful for debugging the agent's decision-making process and interaction with tools.
+# context=context:
+#   Provides the agent with background knowledge and rules about the database and its collections. This context helps the agent generate more accurate and relevant responses.
+
         return ReActAgent.from_tools(
             self.tools,
             llm=self.llm,
