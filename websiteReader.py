@@ -30,7 +30,7 @@ class WebsiteReader:
         
         # Initialize state
         self.index = None
-        self.base_url = "https://econsulate.net/"
+        self.base_url = "https://www.dnatatravel.com/"
         self.initialization_started = False
         self.documents = []
         
