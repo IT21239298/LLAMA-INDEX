@@ -23,7 +23,7 @@ def multiplay(a: float, b: float) -> float:
 def divide(a: float, b: float) -> float:
     "Divide two numbers and returns the quotient"
     return a / b
-
+#tools
 add_tool = FunctionTool.from_defaults(fn=add)
 sub_tool = FunctionTool.from_defaults(fn=subtract)
 mul_tool = FunctionTool.from_defaults(fn=multiplay)
