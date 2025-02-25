@@ -59,7 +59,22 @@ class TenantDatabaseChatbot:
                 'unique_fields': ['caseId'],
                 'sort_field': 'createdAt',
                 'required_fields': ['caseId', 'status', 'priority']
-            }
+            },
+            'hotels': {
+                'unique_fields': ['_id'],
+                'sort_field': 'name',
+                'required_fields': ['name', 'description', 'location']
+            },
+            'attractions': {
+                'unique_fields': ['_id'],
+                'sort_field': 'name',
+                'required_fields': ['name', 'category', 'description']
+            },
+            'cruises': {
+                'unique_fields': ['_id'],
+                'sort_field': 'name',
+                'required_fields': ['name', 'cruise_line', 'departure_port', 'duration_nights', 'price_per_person_AED']
+            },
         }
         
         self.collections = self._get_collections()
@@ -404,6 +419,9 @@ class TenantDatabaseChatbot:
         IMPORTANT RULES:
         1. ALWAYS verify data exists before making statements or modifications
         2. For each collection, use appropriate search criteria:
+           - attractions: search by '_id', 'name', or 'category', or filter by 'description', or 'location'
+           - cruises: search by '_id', 'name', 'cruise_line', or 'departure_port', or 'duration_nights',or 'price_per_person_AED'
+           - hotels: search by '_id', 'name', or filter by facilities or 'hotel_type' or 'hotel_class', or 'location' or 'hotel'
            - contacts: email, primaryContactNo, sequenceId
            - messages: messageId
            - conversations: conversationId
