@@ -27,7 +27,7 @@ class TenantDatabaseChatbot:
         mongo_uri = os.getenv("MONGODB_URI")
         print(f"Connecting to MongoDB...")
         self.mongo_client = MongoClient(mongo_uri)
-        self.db = self.mongo_client.tn_txbglk
+        self.db = self.mongo_client.chatbotSithum
         
         # Initialize OpenAI
         self.llm = OpenAI(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
