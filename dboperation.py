@@ -222,19 +222,34 @@ class TenantDatabaseChatbot:
             return json.dumps({"error": f"Error searching collection: {str(e)}"})
 
     def semantic_search(self, collection: str, search_text: str, limit: int = 5) -> str:
-        """Perform semantic search across documents."""
+        """
+        Perform semantic search with LLM-powered result interpretation.
+        
+        Args:
+            collection (str): Collection to search
+            search_text (str): Search query
+            limit (int, optional): Maximum number of results. Defaults to 5.
+        
+        Returns:
+            str: JSON-formatted, LLM-processed search results
+        """
         try:
+            # Validate collection
             if collection not in self.collections:
-                return json.dumps({"error": f"Collection '{collection}' not found", 
-                                  "available": list(self.collections.keys())})
+                return json.dumps({
+                    "error": f"Collection '{collection}' not found", 
+                    "available": list(self.collections.keys())
+                })
             
             # Get documents from collection
             documents = list(self.collections[collection]["collection"].find())
             
             if not documents:
-                return json.dumps({"error": f"No documents found in collection '{collection}'"})
+                return json.dumps({
+                    "error": f"No documents found in collection '{collection}'"
+                })
             
-            # Initialize text splitter for better semantic chunking
+            # Use advanced text splitter for semantic chunking
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=1000,
                 chunk_overlap=200
@@ -254,10 +269,12 @@ class TenantDatabaseChatbot:
                 # Store chunks with metadata
                 for chunk in chunks:
                     all_chunks.append(chunk)
-                    chunk_metadata.append({"doc_id": doc["_id"]})
+                    chunk_metadata.append({"doc_id": doc["_id"], "doc": doc})
             
             if not all_chunks:
-                return json.dumps({"error": f"No text content found for semantic search"})
+                return json.dumps({
+                    "error": f"No text content found for semantic search"
+                })
             
             # Create embeddings and calculate similarity
             query_embedding = self.embeddings.embed_query(search_text)
@@ -274,41 +291,110 @@ class TenantDatabaseChatbot:
             
             # Get unique documents from top chunks
             top_matches = similarity_scores[:min(limit*2, len(similarity_scores))]
-            unique_doc_ids = {chunk_metadata[idx]["doc_id"] for idx, _ in top_matches}
+            unique_docs = {}
             
-            # Calculate document scores and retrieve full documents
-            results = []
-            for doc_id in unique_doc_ids:
-                doc = self.collections[collection]["collection"].find_one({"_id": doc_id})
-                if doc:
-                    # Calculate score as max of its chunks' scores
-                    doc_chunks = [i for i, meta in enumerate(chunk_metadata) 
-                                 if meta["doc_id"] == doc_id]
-                    score = max(similarity_scores[i][1] for i in doc_chunks 
-                               if i < len(similarity_scores))
-                    
-                    # Add document with score
-                    doc_with_score = self._format_document(doc)
-                    doc_with_score["_similarity_score"] = score
-                    
-                    # Add matching context (up to 2 chunks)
-                    matching_chunks = [all_chunks[idx] for idx, _ in top_matches 
-                                      if chunk_metadata[idx]["doc_id"] == doc_id][:2]
-                    if matching_chunks:
-                        doc_with_score["_matching_context"] = matching_chunks
-                        
-                    results.append(doc_with_score)
+            for idx, score in top_matches:
+                doc_id = chunk_metadata[idx]["doc_id"]
+                if doc_id not in unique_docs:
+                    unique_docs[doc_id] = {
+                        "doc": chunk_metadata[idx]["doc"],
+                        "scores": [],
+                        "chunks": []
+                    }
+                unique_docs[doc_id]["scores"].append(score)
+                unique_docs[doc_id]["chunks"].append(all_chunks[idx])
             
-            # Sort results by score and limit
-            results.sort(key=lambda x: x["_similarity_score"], reverse=True)
-            results = results[:limit]
-            
-            if not results:
-                return json.dumps({"error": f"No relevant documents found for '{search_text}'"})
+            # Prepare results for LLM processing
+            processed_results = []
+            for doc_id, doc_info in unique_docs.items():
+                # Calculate document score
+                doc_score = max(doc_info["scores"])
                 
-            return json.dumps(results, indent=2, ensure_ascii=False)
+                # Prepare document for processing
+                formatted_doc = self._format_document(doc_info["doc"])
+                formatted_doc["_similarity_score"] = doc_score
+                formatted_doc["_matching_context"] = doc_info["chunks"][:2]
+                
+                processed_results.append(formatted_doc)
+            
+            # Sort results by score
+            processed_results.sort(key=lambda x: x["_similarity_score"], reverse=True)
+            processed_results = processed_results[:limit]
+            
+            # Prepare LLM context
+            llm_context = {
+                "query": search_text,
+                "collection": collection,
+                "results": processed_results
+            }
+            
+            # Use LLM to generate user-friendly interpretation
+            try:
+                # Prepare LLM prompt
+                llm_prompt = f"""You are an AI assistant interpreting search results for the query: "{search_text}"
+
+                Context:
+                - Collection searched: {collection}
+                - Number of results: {len(processed_results)}
+
+                Raw Results:
+                {json.dumps(processed_results, indent=2)}
+
+                Task:
+                1. Analyze the search results carefully
+                2. Generate a concise, informative, and engaging summary
+                3. Highlight the most relevant information
+                4. Use a friendly, conversational tone
+                5. Provide context and insights
+                6. If results are limited, suggest alternatives or provide helpful guidance
+
+                Output Requirements:
+                - Start with a brief introduction explaining the search context
+                - Summarize key findings
+                - Provide brief details about top results
+                - End with suggestions or next steps
+                """
+                # Use the LLM to process results
+                response_tool = FunctionTool.from_defaults(
+                    fn=lambda: llm_prompt,
+                    name="process_search_results",
+                    description="Generate user-friendly interpretation of search results"
+                )
+
+                # Create a temporary agent for result processing
+                result_agent = ReActAgent.from_tools(
+                    [response_tool],
+                    llm=self.llm,
+                    verbose=False,
+                    context=llm_prompt
+                )
+
+                # Generate response
+                llm_response = result_agent.chat(f"Interpret search results for query: {search_text}")
+                
+                # Prepare final output
+                final_output = {
+                    "original_query": search_text,
+                    "collection": collection,
+                    "llm_interpretation": llm_response,
+                    "raw_results": processed_results
+                }
+                
+                return json.dumps(final_output, indent=2, ensure_ascii=False)
+            
+            except Exception as llm_error:
+                # Fallback if LLM processing fails
+                return json.dumps({
+                    "original_query": search_text,
+                    "collection": collection,
+                    "raw_results": processed_results,
+                    "error": f"LLM processing failed: {str(llm_error)}"
+                }, indent=2)
+        
         except Exception as e:
-            return json.dumps({"error": f"Error performing semantic search: {str(e)}"})
+            return json.dumps({
+                "error": f"Error performing semantic search: {str(e)}"
+            }, indent=2)
     
     def _document_to_text(self, doc: Dict) -> str:
         """Convert document to searchable text format."""
@@ -509,7 +595,7 @@ class TenantDatabaseChatbot:
         
         3. When searching data:
            - Use search_collection for exact matches
-           - Use semantic_search for natural language queries about a specific collection
+           - Use semantic_search for natural language queries about a specific collection also need to update results using natural_language_querty
            - Use natural_language_query for open-ended questions
            
         4. Always provide clear, accurate responses based on the actual data in the database
