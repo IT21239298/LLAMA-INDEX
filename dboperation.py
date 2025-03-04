@@ -11,6 +11,7 @@ import json
 from datetime import datetime
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
+from user_managment import UserManager, mongo_to_json
 
 class MongoJSONEncoder(json.JSONEncoder):
     """Custom JSON encoder for MongoDB specific types."""
@@ -41,6 +42,13 @@ class TenantDatabaseChatbot:
         # Create tools and agent
         self.tools = self._create_tools()
         self.agent = self._create_agent()
+
+        # Initialize user management
+        self.user_manager = UserManager(mongo_uri, "chatbotSithum")
+    
+        # Track current user in session
+        self.current_user = None
+        self.session_token = None
 
     def _initialize_collections(self):
         """Analyze collections and their schemas efficiently."""
@@ -205,6 +213,9 @@ class TenantDatabaseChatbot:
     def search_collection(self, collection: str, query: Dict = None, limit: int = 10) -> str:
         """Search documents in a collection."""
         try:
+            # Check authentication
+            self.require_authentication()
+
             if collection not in self.collections:
                 return json.dumps({"error": f"Collection '{collection}' not found", 
                                   "available": list(self.collections.keys())})
@@ -608,10 +619,115 @@ class TenantDatabaseChatbot:
             verbose=True,
             context=context
         )
+    
+    # user authentication and related functionalities
+    def authenticate_user(self, name, email, contact_number):
+        """
+        Authenticate a user by creating or retrieving their profile.
+        
+        Args:
+            name (str): User's name
+            email (str): User's email
+            contact_number (str): User's contact number
+            
+        Returns:
+            tuple: (success, message)
+        """
+        # Check if user exists
+        user = self.user_manager.get_user(email, "email")
+        
+        # Create user if doesn't exist
+        if not user:
+            success, result = self.user_manager.create_user(
+                name=name,
+                email=email,
+                contact_number=contact_number
+            )
+            
+            if not success:
+                return False, f"Failed to create user: {result}"
+                
+            user_id = result
+        else:
+            user_id = str(user["_id"])
+            
+            # Update user info if needed
+            updates = {}
+            if user.get("name") != name:
+                updates["name"] = name
+            if user.get("contact_number") != contact_number:
+                updates["contact_number"] = contact_number
+                
+            if updates:
+                self.user_manager.update_user(user_id, updates)
+        
+        # Create session
+        success, token = self.user_manager.create_session(user_id)
+        if not success:
+            return False, f"Failed to create session: {token}"
+            
+        # Store current user
+        is_valid, user = self.user_manager.validate_session(token)
+        if not is_valid:
+            return False, "Failed to validate new session"
+            
+        self.current_user = user
+        self.session_token = token
+        
+        return True, "Authentication successful"
+
+    def is_authenticated(self):
+        """Check if a user is authenticated in the current session."""
+        return self.current_user is not None
+
+    def require_authentication(self):
+        """Check authentication and raise exception if not authenticated."""
+        if not self.is_authenticated():
+            raise Exception("Authentication required. Please provide your name, email, and contact number.")
+
+    def validate_session(self, token):
+        """Validate a session token and set current user."""
+        is_valid, user = self.user_manager.validate_session(token)
+        if is_valid:
+            self.current_user = user
+            self.session_token = token
+        return is_valid
+
+    def record_interaction(self, query, response=None, metadata=None):
+        """Record a user interaction with the system."""
+        if self.current_user:
+            return self.user_manager.record_interaction(
+                str(self.current_user["_id"]),
+                query,
+                response,
+                metadata
+            )
+        return False
             
     def chat(self):
-        """Start an interactive chat session."""
-        print(f"\nAI Database Assistant - Available collections: {list(self.collections.keys())}")
+        """Start an interactive chat session with authentication."""
+        print(f"\nAI Database Assistant - Please authenticate to continue")
+    
+        # Authentication flow
+        authenticated = False
+        while not authenticated:
+            print("\nPlease provide your information to continue:")
+            name = input("Name: ").strip()
+            email = input("Email: ").strip()
+            contact = input("Contact Number: ").strip()
+            
+            if not name or not email or not contact:
+                print("All fields are required. Please try again.")
+                continue
+            
+            success, message = self.authenticate_user(name, email, contact)
+            if success:
+                authenticated = True
+                print(f"\nAuthentication successful. Welcome, {name}!")
+            else:
+                print(f"\nAuthentication failed: {message}")
+        
+        print(f"\nAvailable collections: {list(self.collections.keys())}")
         
         while True:
             user_input = input("\nUser: ").strip()
@@ -619,6 +735,9 @@ class TenantDatabaseChatbot:
                 break
             
             try:
+                 # Record the interaction 
+                self.record_interaction(user_input)
+            
                 # Detect if it's a direct query
                 is_direct_query = any(user_input.lower().startswith(prefix) for prefix in 
                                      ["find", "search", "get", "show", "list", "what", "which", 
