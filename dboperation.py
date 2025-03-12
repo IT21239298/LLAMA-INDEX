@@ -1,4 +1,5 @@
 import os
+import logging
 from dotenv import load_dotenv
 from pymongo import MongoClient, UpdateOne
 from bson import ObjectId
@@ -6,12 +7,16 @@ from llama_index.core import VectorStoreIndex, Document, Settings
 from llama_index.llms.openai import OpenAI
 from llama_index.core.tools import FunctionTool
 from llama_index.core.agent import ReActAgent
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple, Optional
 import json
 from datetime import datetime
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from user_managment import UserManager, mongo_to_json
+from service.user_managment import UserManager, mongo_to_json
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('dboperation')
 
 class MongoJSONEncoder(json.JSONEncoder):
     """Custom JSON encoder for MongoDB specific types."""
@@ -49,6 +54,7 @@ class TenantDatabaseChatbot:
         # Track current user in session
         self.current_user = None
         self.session_token = None
+
 
     def _initialize_collections(self):
         """Analyze collections and their schemas efficiently."""
@@ -621,9 +627,10 @@ class TenantDatabaseChatbot:
         )
     
     # user authentication and related functionalities
-    def authenticate_user(self, name, email, contact_number):
+    def authenticate_user(self, name: str, email: str, contact_number: str) -> Tuple[bool, str]:
         """
         Authenticate a user by creating or retrieving their profile.
+        Also creates and stores a new session.
         
         Args:
             name (str): User's name
@@ -633,50 +640,98 @@ class TenantDatabaseChatbot:
         Returns:
             tuple: (success, message)
         """
-        # Check if user exists
-        user = self.user_manager.get_user(email, "email")
-        
-        # Create user if doesn't exist
-        if not user:
-            success, result = self.user_manager.create_user(
-                name=name,
-                email=email,
-                contact_number=contact_number
-            )
+        try:
+            # Validate inputs
+            if not name or not email or not contact_number:
+                return False, "Name, email, and contact number are required"
+                
+            # Check if user exists
+            user = self.user_manager.get_user(email, "email")
             
+            # Create user if doesn't exist
+            if not user:
+                logger.info(f"Creating new user with email: {email}")
+                success, result = self.user_manager.create_user(
+                    name=name,
+                    email=email,
+                    contact_number=contact_number
+                )
+                
+                if not success:
+                    logger.warning(f"Failed to create user: {result}")
+                    return False, f"Failed to create user: {result}"
+                    
+                user_id = result
+            else:
+                user_id = str(user["_id"])
+                logger.info(f"Found existing user: {name}, ID: {user_id}")
+                
+                # Update user info if needed
+                updates = {}
+                if user.get("name") != name:
+                    updates["name"] = name
+                if user.get("contact_number") != contact_number:
+                    updates["contact_number"] = contact_number
+                    
+                if updates:
+                    logger.info(f"Updating user information: {', '.join(updates.keys())}")
+                    self.user_manager.update_user(user_id, updates)
+            
+            # Create session
+            success, token = self.user_manager.create_session(user_id)
             if not success:
-                return False, f"Failed to create user: {result}"
+                logger.warning(f"Failed to create session: {token}")
+                return False, f"Failed to create session: {token}"
                 
-            user_id = result
-        else:
-            user_id = str(user["_id"])
-            
-            # Update user info if needed
-            updates = {}
-            if user.get("name") != name:
-                updates["name"] = name
-            if user.get("contact_number") != contact_number:
-                updates["contact_number"] = contact_number
+            # Store current user and session token
+            is_valid, user = self.user_manager.validate_session(token)
+            if not is_valid:
+                logger.warning(f"Failed to validate new session")
+                return False, "Failed to validate new session"
                 
-            if updates:
-                self.user_manager.update_user(user_id, updates)
-        
-        # Create session
-        success, token = self.user_manager.create_session(user_id)
-        if not success:
-            return False, f"Failed to create session: {token}"
+            self.current_user = user
+            self.session_token = token
+            logger.info(f"Successfully authenticated user: {name} with new session")
             
-        # Store current user
-        is_valid, user = self.user_manager.validate_session(token)
-        if not is_valid:
-            return False, "Failed to validate new session"
+            return True, "Authentication successful"
             
-        self.current_user = user
-        self.session_token = token
+        except Exception as e:
+            logger.error(f"Error in authenticate_user: {str(e)}", exc_info=True)
+            return False, f"Authentication error: {str(e)}"
         
-        return True, "Authentication successful"
+    def end_session(self, token: str) -> bool:
+        """End a user session.
+        
+        Args:
+            token (str): The session token to invalidate
+            
+        Returns:
+            bool: True if session was ended successfully, False otherwise
+        """
+        try:
+            if not hasattr(self, 'user_manager'):
+                logger.error("UserManager not initialized")
+                return False
+                
+            result = self.user_manager.end_session(token)
+            
+            if result:
+                # Clear current user and session token if they match
+                if self.session_token == token:
+                    self.current_user = None
+                    self.session_token = None
+                    
+                logger.info(f"Session ended successfully")
+            else:
+                logger.warning(f"Failed to end session")
+                
+            return result
+        except Exception as e:
+            logger.error(f"Error ending session: {str(e)}", exc_info=True)
+            return False
+                
 
-    def is_authenticated(self):
+    def is_authenticated(self) -> bool:
         """Check if a user is authenticated in the current session."""
         return self.current_user is not None
 
@@ -685,24 +740,66 @@ class TenantDatabaseChatbot:
         if not self.is_authenticated():
             raise Exception("Authentication required. Please provide your name, email, and contact number.")
 
-    def validate_session(self, token):
-        """Validate a session token and set current user."""
-        is_valid, user = self.user_manager.validate_session(token)
-        if is_valid:
-            self.current_user = user
+    def validate_session(self, token: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """
+        Validate a session token and return user information.
+        
+        Args:
+            token (str): Session token to validate
+            
+        Returns:
+            tuple: (is_authenticated, user_info)
+        """
+        try:
+            if not token:
+                logger.warning("No session token provided")
+                return False, None
+                
+            # Check if user_manager is properly initialized
+            if not hasattr(self, 'user_manager'):
+                logger.error("UserManager not initialized")
+                return False, None
+                
+            # Validate the session using UserManager
+            is_valid, result = self.user_manager.validate_session(token)
+            
+            if not is_valid:
+                logger.warning(f"Invalid or expired session token")
+                return False, None
+                
+            # Store current user and session token for future use
+            self.current_user = result
             self.session_token = token
-        return is_valid
+            
+            logger.info(f"Successfully validated session for user: {result.get('name', 'Unknown')}")
+            return True, result
+            
+        except Exception as e:
+            logger.error(f"Error validating session: {str(e)}", exc_info=True)
+            return False, None
 
-    def record_interaction(self, query, response=None, metadata=None):
-        """Record a user interaction with the system."""
-        if self.current_user:
-            return self.user_manager.record_interaction(
-                str(self.current_user["_id"]),
-                query,
-                response,
-                metadata
-            )
-        return False
+    def record_interaction(self, query: str, response: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Record a user interaction with the system.
+        
+        Args:
+            query (str): The user's query
+            response (str, optional): The system's response
+            metadata (dict, optional): Any additional metadata
+            
+        Returns:
+            bool: True if interaction was recorded successfully, False otherwise
+        """
+        try:
+            if not self.is_authenticated():
+                logger.warning("Cannot record interaction - user not authenticated")
+                return False
+                
+            user_id = str(self.current_user["_id"])
+            return self.user_manager.record_interaction(user_id, query, response, metadata)
+        except Exception as e:
+            logger.error(f"Error recording interaction: {str(e)}", exc_info=True)
+            return False
             
     def chat(self):
         """Start an interactive chat session with authentication."""
