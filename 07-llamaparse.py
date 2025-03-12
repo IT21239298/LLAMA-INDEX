@@ -29,7 +29,7 @@ index = VectorStoreIndex.from_documents(documents)
 
 query_engine = index.as_query_engine()
 
-response = query_engine.query("i need information about visa requiremments to travel to the US")
+response = query_engine.query("i need available insuarance options")
 
 print(response)
 
